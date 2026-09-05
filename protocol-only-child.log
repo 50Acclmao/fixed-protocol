@@ -1,0 +1,17 @@
+[start-batch] count=1 hash=eb2105 socket=wss://qrp6ujau11f36bnm-c.uvwx.xyz:8443/5001/?a=3&b=40a19684adeefd5e&t=1788515036
+[start] pid=14936 id=eb2105-1 hash=eb2105 socket=wss://qrp6ujau11f36bnm-c.uvwx.xyz:8443/5001/?a=3&b=40a19684adeefd5e&t=1788515036
+[stdout] [build] protocol-only updated party-proxy-u-position v2026-07-14
+[stdout] [ceb2105-1] [INFO] validation-R live-only hash=#eb2105 source=live-missing value=(none)
+[stdout] [ceb2105-1] Using socket URL: wss://qrp6ujau11f36bnm-c.uvwx.xyz:8443/5001/?a=3&b=40a19684adeefd5e&t=1788515036
+[stdout] [ceb2105-1] [INFO] tank target=auto6
+[stdout] [ceb2105-1] WebSocket open; sending session open packet.
+[stdout] Handshake complete; protection state initialized.
+[stdout] [OUT] hello source=default bytes=4
+[stdout] [OUT] fingerprint source=sanitized-default
+[stdout] [ceb2105-1] [IN 1] len=141 cmd=K text=["Your IP address have been blacklisted due to suspicious activities.","If you are using a VPN, please turn it off."] hex=4bfe8900596f757220495020616464726573732068617665
+[stdout] [ceb2105-1] [IN 2] len=57 cmd=J labels=["Triangle"] hex=4a02f0eeb9c3456767c00600ff00009040000002000000f0
+[stdout] [ceb2105-1] [IN 8] len=8 cmd=P hex=500001e32101c0bf
+[stdout] [OUT] ping bytes=1 via=interval
+[stdout] Inbound command counts: J:1, K:1, P:1, u:30
+[stdout] Mode summary: hash=#eb2105
+[stdout] WebSocket closed code=1005 reason=
