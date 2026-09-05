@@ -1,6 +1,3 @@
-Use port `8082` in the workflow:
-
-```yaml
 name: Start app with TryCloudflare
 
 on:
@@ -28,7 +25,7 @@ jobs:
           sudo dpkg -i cloudflared.deb
 
       - name: Start app
-        run: npm start > app.log 2>&1 &
+        run: node server.js > app.log 2>&1 &
 
       - name: Start TryCloudflare tunnel
         run: |
@@ -38,4 +35,3 @@ jobs:
 
       - name: Keep workflow running
         run: sleep 3600
-```
