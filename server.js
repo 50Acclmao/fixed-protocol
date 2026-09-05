@@ -22,16 +22,56 @@
     };
 
 
-    const DEFAULT_DECODO_PROXY = "http://spjkufyo3c:bc9QQa_elQYmp63qg5@dc.decodo.com:10000/";
-    const PROXIES = (process.env.ARRAS_PROXY_URLS || process.env.ARRAS_PROXY_URL || "")
+    const prod = false;
+    // Free proxy pool sourced from public lists — replaces the old hardcoded
+    // Decodo proxy. Set ARRAS_PROXY_URLS / ARRAS_PROXY_URL for a static list;
+    // leave empty to auto-fetch fresh free proxies.
+    const STATIC_PROXIES = (process.env.ARRAS_PROXY_URLS || process.env.ARRAS_PROXY_URL || "")
         .split(",")
         .map((value) => value.trim())
         .filter(Boolean);
-    const prod = false;
+    // HttpsProxyAgent is only used to rank proxies by latency; the server
+    // still boots without it.
+    let HttpsProxyAgent = null;
+    try {
+        const proxyAgentModule = await import("https-proxy-agent");
+        HttpsProxyAgent = proxyAgentModule.HttpsProxyAgent || proxyAgentModule.default;
+    } catch {}
     const envInt = (name, fallback, min = 0) => {
         const value = Number.parseInt(process.env[name] || "", 10);
         return Number.isFinite(value) && value >= min ? value : fallback;
     };
+
+    // Free-proxy pool configuration (decoupled from the legacy Decodo default).
+    const MAX_PROXIES = envInt("ARRAS_MAX_PROXIES", 5000, 1);
+    const PROXY_REFRESH_MS = envInt("ARRAS_PROXY_REFRESH_MS", 180000, 10000);
+    let PROXY_POOL = STATIC_PROXIES.slice();
+    let PROXY_RANKED = [];
+    let isFetchingProxies = false;
+    let isRankingProxies = false;
+    const PROXY_SOURCES = [
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=8000&country=all&ssl=all&anonymity=all",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+        "https://www.proxy-list.download/api/v1/get?type=http",
+        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
+        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+        "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
+        "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+        "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt",
+        "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt",
+        "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/http/http.txt",
+        "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
+        "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
+        "https://raw.githubusercontent.com/BreakingTechFr/Proxy_Free/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
+        "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt",
+        "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt",
+        "https://raw.githubusercontent.com/im-in-tak/PROXY-LIST/main/proxy.txt"
+    ];
     const WORKER_MEMORY_MB = envInt("ARRAS_WORKER_MEMORY_MB", 384, 64);
     const BOTS_PER_WORKER = envInt("ARRAS_BOTS_PER_WORKER", 2, 1);
     const PREWARM_POOL_SIZE = envInt("ARRAS_PREWARM_POOL_SIZE", 0, 0);
@@ -73,6 +113,101 @@
             throw new Error("Could not find arras script close tag");
         }
         return html.slice(scriptStart, scriptTagEnd);
+    }
+
+        async function fetchProxies() {
+        if (STATIC_PROXIES.length) {
+            // Static override: keep as-is, nothing to refresh.
+            return;
+        }
+        if (isFetchingProxies) return;
+        isFetchingProxies = true;
+
+        const all = new Set(PROXY_POOL);
+
+        try {
+            await Promise.allSettled(
+                PROXY_SOURCES.map(async (url) => {
+                    try {
+                        const res = await realFetch(url, { timeout: 10000 });
+                        if (!res.ok) return;
+                        const text = await res.text();
+                        for (const line of text.split(/\r?\n/)) {
+                            const cleaned = line.trim().replace(/^https?:\/\//i, "");
+                            if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}$/.test(cleaned)) {
+                                all.add(`http://${cleaned}`);
+                                if (all.size >= MAX_PROXIES) break;
+                            }
+                        }
+                    } catch {}
+                })
+            );
+
+            // Only swap the live pool when the fetch actually found something.
+            // a bad network moment must not wipe the pool entirely.
+            if (all.size) {
+                PROXY_POOL = Array.from(all).slice(0, MAX_PROXIES);
+                for (let i = PROXY_POOL.length - 1; i > 0; i--) {
+                    const j = (Math.random() * (i + 1)) | 0;
+                    [PROXY_POOL[i], PROXY_POOL[j]] = [PROXY_POOL[j], PROXY_POOL[i]];
+                }
+                console.log(`[proxies] refetched pool (${PROXY_POOL.length})`);
+            }
+        } finally {
+            isFetchingProxies = false;
+        }
+    }
+
+    function rankProxies() {
+        if (!PROXY_POOL.length || !HttpsProxyAgent || isRankingProxies) return;
+        isRankingProxies = true;
+
+        const candidates = PROXY_POOL.slice(0, 800);
+
+        Promise.allSettled(
+            candidates.map(async (proxyUrl) => {
+                const start = Date.now();
+                try {
+                    const res = await realFetch("https://arras.io", {
+                        agent: new HttpsProxyAgent(proxyUrl),
+                        timeout: 4000
+                    });
+                    await res.arrayBuffer();
+                    return { proxyUrl, ms: Date.now() - start };
+                } catch {
+                    return null;
+                }
+            })
+        )
+            .then((results) => {
+                const ranked = results
+                    .flatMap((r) => (r.status === "fulfilled" && r.value ? [r.value] : []))
+                    .sort((a, b) => a.ms - b.ms);
+
+                // Top up the ranked queue from the untested tail so it does not
+                // starve on long 1500-bot runs.
+                PROXY_RANKED = ranked
+                    .map((r) => r.proxyUrl)
+                    .concat(PROXY_POOL.filter((url) => !candidates.includes(url)));
+
+                console.log(`[proxies] ranked ${ranked.length}/${candidates.length} (best ${ranked.length ? ranked[0].ms : "-"}ms)`);
+            })
+            .catch(() => {})
+            .finally(() => {
+                isRankingProxies = false;
+            });
+    }
+
+    function getProxyForSession(session, best = false) {
+        // Defenders / fast connects draw from the latency-ranked head of the pool.
+        if (best && PROXY_RANKED.length) return PROXY_RANKED.shift();
+
+        if (!PROXY_POOL.length) return "";
+
+        const proxy = PROXY_POOL[session.proxyIdx % PROXY_POOL.length];
+        // Advance the cursor for the next call (modulo keeps it bounded).
+        session.proxyIdx = (session.proxyIdx + 1) % PROXY_POOL.length;
+        return proxy;
     }
 
     async function preloadArrasAssets() {
@@ -278,8 +413,8 @@
         const botName = String(options.botName || "thara").trim() || "thara";
         const party = String(hash || "").replace(/^#/, "").match(/\d+$/)?.[0] || "";
         const scriptPath = path.join(__dirname, "protocol-only-random-client.js");
-        const protocolProxyUrl = PROXIES.length ? PROXIES[session.proxyIdx % PROXIES.length] : "";
-        console.log(`[protocol-only] launching count=${count} delay=${delay}ms hash=${hash} proxy=decodo`);
+        const protocolProxyUrl = getProxyForSession(session);
+        console.log(`[protocol-only] launching count=${count} delay=${delay}ms hash=${hash} proxy=${protocolProxyUrl || "direct"}`);
         const shouldPrintProtocolLine = (line) =>
             /\b(WebSocket open|Handshake complete|post-spawn accept|You have spawned|WebSocket error|WebSocket closed|\[retry\]|temporarily banned|blacklisted|Took too long|exited pid|death detected|respawn scheduled|reconnecting after death)\b/i.test(line) ||
             /^\[build\]/.test(line) ||
@@ -357,7 +492,7 @@
             }, i * delay);
             session.spawnTimers.add(timer);
         }
-        session.proxyIdx++;
+        // proxyIdx is advanced inside getProxyForSession(session) above.
 
     }
 
@@ -591,11 +726,12 @@
         };
         session.workers.push(worker);
 
-        console.log(`[socket-resolve] resolving hash: ${normalizedHash}`);
+        const resolveProxyUrl = getProxyForSession(session);
+        console.log(`[socket-resolve] resolving hash: ${normalizedHash} proxy=${resolveProxyUrl || "direct"}`);
         worker.send({
             type: "start", config: {
                 id: `resolve-${Date.now()}`,
-                ...(PROXIES.length ? { proxy: { type: "http", url: PROXIES[session.proxyIdx % PROXIES.length] } } : {}),
+                ...(resolveProxyUrl ? { proxy: { type: "http", url: resolveProxyUrl } } : {}),
                 hash: "#" + normalizedHash,
                 name: "resolver",
                 stats: [0, 0, 0, 0, 0, 0, 0, 9],
@@ -616,7 +752,7 @@
             }
         });
 
-        session.proxyIdx++;
+        // proxyIdx advanced inside getProxyForSession(session) above.
     }
 
     function processSpawnQueue(session) {
@@ -633,9 +769,8 @@
 
         session.spawnTimer = setTimeout(() => {
             session.spawnTimer = null;
-            if (session.proxyIdx >= PROXIES.length) {
-                session.proxyIdx = 0;
-            }
+            // proxy rotation is handled per-spawn inside getProxyForSession();
+            // proxyIdx uses modulo on PROXY_POOL length, so no reset is needed.
 
             const worker = acquireWorker(session);
             worker.botId = botId;
@@ -652,10 +787,11 @@
                 }
             }
 
+            const spawnProxyUrl = getProxyForSession(session);
             worker.send({
                 type: "start", config: {
                     id: botId,
-                    ...(PROXIES.length ? { proxy: { type: "http", url: PROXIES[session.proxyIdx % PROXIES.length] } } : {}),
+                    ...(spawnProxyUrl ? { proxy: { type: "http", url: spawnProxyUrl } } : {}),
                     hash: "#" + job.hash,
                     name: job.botName,
                     stats: [0, 0, 0, 0, 0, 0, 0, 9],
@@ -676,7 +812,7 @@
                 }
             });
 
-            session.proxyIdx++;
+            // proxyIdx advanced inside getProxyForSession(session) above.
             session.spawnQueueActive = false;
             processSpawnQueue(session);
         }, spawnDelay);
@@ -925,6 +1061,19 @@
 
 
     const port = prod ? process.env.PORT : 8082;
+
+    // Prime the free-proxy pool (or keep the static list) before serving.
+    await fetchProxies();
+    if (PROXY_POOL.length) {
+        console.log(`[proxies] boot pool ready with ${PROXY_POOL.length} proxies`);
+        setTimeout(() => { if (HttpsProxyAgent) rankProxies(); }, 5000);
+    }
+    // Periodically refresh the free-proxy pool and re-rank by latency.
+    setInterval(() => {
+        fetchProxies();
+        if (HttpsProxyAgent) rankProxies();
+    }, PROXY_REFRESH_MS);
+
     await preloadArrasAssets();
     server.listen(port, () => {
         console.log("Server listening on port!!!!", port);
