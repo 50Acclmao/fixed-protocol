@@ -22,13 +22,13 @@ jobs:
         run: |
           curl -L --output cloudflared.deb \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
+          sudo apt-get update
+          sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
 
-      - name: Start app
-        run: node server.js > app.log 2>&1 &
-
-      - name: Start TryCloudflare tunnel
+      - name: Start app and tunnel
         run: |
+          node server.js > app.log 2>&1 &
+          sleep 3
           cloudflared tunnel --url http://localhost:8082 > tunnel.log 2>&1 &
           sleep 5
           grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' tunnel.log || cat tunnel.log
