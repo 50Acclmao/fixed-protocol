@@ -22,85 +22,11 @@
     };
 
 
-    const MAX_PROXIES = 4000;
-    let PROXY_POOL = [];
-
-    const PROXY_SOURCES = [
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=8000&country=all&ssl=all&anonymity=all",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-        "https://www.proxy-list.download/api/v1/get?type=http",
-        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
-        "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
-        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
-        "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
-        "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-        "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt",
-        "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt",
-        "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/http/http.txt",
-        "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
-        "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
-        "https://raw.githubusercontent.com/BreakingTechFr/Proxy_Free/main/proxies/http.txt",
-        "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
-        "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt",
-        "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt",
-        "https://raw.githubusercontent.com/im-in-tak/PROXY-LIST/main/proxy.txt",
-        "https://raw.githubusercontent.com/UptimerBot/proxy-list/main/proxies/http.txt",
-        "https://raw.githubusercontent.com/gitrecon1455/ProxyScraper/main/proxies.txt",
-        "https://raw.githubusercontent.com/almroot/proxylist/master/list.txt",
-        "https://raw.githubusercontent.com/saisuiu/Lionkings-Http-Proxys-Proxies/main/free.txt",
-        "https://raw.githubusercontent.com/aslisk/proxyhttps/main/https.txt",
-        "https://raw.githubusercontent.com/proxylist-to/proxy-list/main/http.txt",
-        "https://raw.githubusercontent.com/elliottophellia/proxylist/master/results/http/global/http_checked.txt",
-        "https://raw.githubusercontent.com/opsxcq/proxy-list/master/list.txt",
-        "https://raw.githubusercontent.com/sashkiwer/proxy-list/main/http.txt",
-        "https://raw.githubusercontent.com/HyperBeats/proxy-list/main/http.txt"
-    ];
-
-    async function fetchProxies() {
-        const all = new Set();
-
-        await Promise.allSettled(
-            PROXY_SOURCES.map(async (url) => {
-                try {
-                    const res = await realFetch(url, { timeout: 12000 });
-                    if (!res.ok) return;
-
-                    const text = await res.text();
-
-                    for (const line of text.split(/\r?\n/)) {
-                        const cleaned = line.trim().replace(/^https?:\/\//i, "");
-
-                        if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}$/.test(cleaned)) {
-                            all.add(`http://${cleaned}`);
-
-                            if (all.size >= MAX_PROXIES) break;
-                        }
-                    }
-                } catch {}
-            })
-        );
-
-        PROXY_POOL = Array.from(all);
-
-        for (let i = PROXY_POOL.length - 1; i > 0; i--) {
-            const j = (Math.random() * (i + 1)) | 0;
-            [PROXY_POOL[i], PROXY_POOL[j]] = [PROXY_POOL[j], PROXY_POOL[i]];
-        }
-
-        console.log(`[proxies] fetched ${PROXY_POOL.length} unique proxies`);
-    }
-
-    function resetSessionProxies(session) {
-        session.proxyQueue = PROXY_POOL.slice();
-    }
-
-    function takeUniqueProxy(session) {
-        if (!session.proxyQueue || session.proxyQueue.length === 0) return null;
-        return session.proxyQueue.pop();
-    }
+    const DEFAULT_DECODO_PROXY = "http://spjkufyo3c:bc9QQa_elQYmp63qg5@dc.decodo.com:10000/";
+    const PROXIES = (process.env.ARRAS_PROXY_URLS || process.env.ARRAS_PROXY_URL || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
     const prod = false;
     const envInt = (name, fallback, min = 0) => {
         const value = Number.parseInt(process.env[name] || "", 10);
@@ -352,8 +278,8 @@
         const botName = String(options.botName || "thara").trim() || "thara";
         const party = String(hash || "").replace(/^#/, "").match(/\d+$/)?.[0] || "";
         const scriptPath = path.join(__dirname, "protocol-only-random-client.js");
-        const protocolProxyUrl = takeUniqueProxy(session) || "";
-        console.log(`[protocol-only] launching count=${count} delay=${delay}ms hash=${hash} proxy=${protocolProxyUrl ? "free-pool" : "none"}`);
+        const protocolProxyUrl = PROXIES.length ? PROXIES[session.proxyIdx % PROXIES.length] : "";
+        console.log(`[protocol-only] launching count=${count} delay=${delay}ms hash=${hash} proxy=decodo`);
         const shouldPrintProtocolLine = (line) =>
             /\b(WebSocket open|Handshake complete|post-spawn accept|You have spawned|WebSocket error|WebSocket closed|\[retry\]|temporarily banned|blacklisted|Took too long|exited pid|death detected|respawn scheduled|reconnecting after death)\b/i.test(line) ||
             /^\[build\]/.test(line) ||
@@ -669,7 +595,7 @@
         worker.send({
             type: "start", config: {
                 id: `resolve-${Date.now()}`,
-                ...(takeUniqueProxy(session) ? { proxy: { type: "http", url: takeUniqueProxy(session) } } : {}),
+                ...(PROXIES.length ? { proxy: { type: "http", url: PROXIES[session.proxyIdx % PROXIES.length] } } : {}),
                 hash: "#" + normalizedHash,
                 name: "resolver",
                 stats: [0, 0, 0, 0, 0, 0, 0, 9],
@@ -707,6 +633,10 @@
 
         session.spawnTimer = setTimeout(() => {
             session.spawnTimer = null;
+            if (session.proxyIdx >= PROXIES.length) {
+                session.proxyIdx = 0;
+            }
+
             const worker = acquireWorker(session);
             worker.botId = botId;
             worker.botIds.push(botId);
@@ -725,7 +655,7 @@
             worker.send({
                 type: "start", config: {
                     id: botId,
-                    ...(takeUniqueProxy(session) ? { proxy: { type: "http", url: takeUniqueProxy(session) } } : {}),
+                    ...(PROXIES.length ? { proxy: { type: "http", url: PROXIES[session.proxyIdx % PROXIES.length] } } : {}),
                     hash: "#" + job.hash,
                     name: job.botName,
                     stats: [0, 0, 0, 0, 0, 0, 0, 9],
@@ -773,8 +703,7 @@
                 tank: "auto6",
                 tanks: [],
                 tankIdx: 0,
-                proxyIdx: 0,
-                proxyQueue: []
+                proxyIdx: 0
             });
         }
         const session = sessions.get(addr);
@@ -811,7 +740,6 @@
                         if (data[0] == (challenge ^ 845)) {
                             verified = true;
                             console.log(addr, "verified");
-                            resetSessionProxies(session);
                             fillPool(session);
                         } else {
                             close();
@@ -918,7 +846,6 @@
                             }
                             session.workers = [];
                             stopProtocolOnlyClients(session);
-                            resetSessionProxies(session);
                         }
 
                         break;
@@ -998,7 +925,6 @@
 
 
     const port = prod ? process.env.PORT : 8082;
-    await fetchProxies();
     await preloadArrasAssets();
     server.listen(port, () => {
         console.log("Server listening on port!!!!", port);
