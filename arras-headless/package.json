@@ -1,0 +1,23 @@
+{
+    "name": "arras-headless",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Headless Arras.io protocol bot farm — worker threads, proxy pool, session server.",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js",
+        "server": "node server.js",
+        "check": "node --check server.js && node --check index.js"
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "dependencies": {
+        "https-proxy-agent": "^9.0.0",
+        "msgpackr": "^1.11.9",
+        "node-fetch": "^3.3.2",
+        "socks-proxy-agent": "^10.0.0",
+        "ws": "^8.20.0",
+        "wss": "^3.3.4"
+    }
+}
