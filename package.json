@@ -1,0 +1,18 @@
+{
+  "name": "arras-protocol-level",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.0.1",
+    "https-proxy-agent": "^9.1.0",
+    "msgpackr": "^2.0.4",
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.61.1",
+    "socks-proxy-agent": "^10.1.0",
+    "ws": "^8.21.0",
+    "wss": "^3.3.4"
+  }
+}
