@@ -119,14 +119,19 @@
         }
     }
 
-    async function rankProxies() {
+    async function rankProxies(defenderCount = 0) {
+        // Ranking is ONLY for defenders — regular follow bots draw straight
+        // from session.proxyQueue and don't care about latency. Skip the entire
+        // latency pass unless there are defenders to feed.
         if (!PROXY_POOL.length || isRankingProxies) return;
+        if (!(defenderCount > 0)) return;
         isRankingProxies = true;
 
         try {
-            // Cap the test load — checking a bigger slice keeps top-tier
-            // defenders fed on very large spawns.
-            const candidates = PROXY_POOL.slice(0, 2500);
+            // Only rank as many proxies as the defender spawn actually needs —
+            // no reason to latency-test thousands for a handful of defenders.
+            const want = Math.min(Math.ceil(defenderCount * 1.5) + 4, PROXY_POOL.length);
+            const candidates = PROXY_POOL.slice(0, want);
 
             const results = await Promise.all(
                 candidates.map(async (proxyUrl) => {
@@ -147,14 +152,10 @@
                 })
             );
 
+            // Fastest first. Only the tested slice goes into the ranked queue;
+            // the untested tail of the pool stays untouched for regular bots.
             const ranked = results.filter(Boolean).sort((a, b) => a.ms - b.ms);
-
-            // Rebuild the ranked queue every cycle. Defenders consume it with
-            // shift(), so top it up from the untested tail to keep it from
-            // starving on long 1500-bot runs.
-            PROXY_RANKED = ranked
-                .map((r) => r.proxyUrl)
-                .concat(PROXY_POOL.filter((url) => !candidates.includes(url)));
+            PROXY_RANKED = ranked.map((r) => r.proxyUrl);
 
             rawLog(`[proxies] ranked ${ranked.length}/${candidates.length} (best ${ranked.length ? ranked[0].ms : "-"}ms)`);
         } finally {
@@ -462,6 +463,14 @@
         // miss (or a slow refetch) kill the entire request. Retries a couple
         // of times while proxies refetch in the background; only gives up when
         // the global cap is reached or the proxy situation can't recover.
+
+        // Proxy ranking exists only for defenders. Kick a latency pass only
+        // when a defender batch needs one — normal follow bots never touch
+        // PROXY_RANKED and never trigger ranking.
+        if (isDefender && PROXY_RANKED.length === 0) {
+            rankProxies(count);
+        }
+
         let spawned = 0;
         let staleMisses = 0;
 
@@ -476,10 +485,15 @@
 
             // Proxy problem: kick a background refetch once, then keep trying
             // a few more iterations so freshly fetched proxies can land.
+            // Only defender batches rank the freshly fetched set.
             staleMisses++;
             if (staleMisses === 1) {
                 rawLog(`[spawn] proxy pool ran low — refetching (spawned ${spawned} so far, ${PROXY_POOL.length} in pool)`);
-                fetchProxies().then(() => rankProxies());
+                if (isDefender) {
+                    fetchProxies().then(() => rankProxies(count));
+                } else {
+                    fetchProxies();
+                }
             }
 
             if (staleMisses >= 4 && PROXY_POOL.length === 0 && !ALLOW_DIRECT) {
@@ -1908,13 +1922,14 @@
     // Fire-and-forget — server listens immediately, caches fill in async.
     // Workers self-load arras.io assets when the caches are still null.
     fetchProxies();
-    rankProxies();
     preloadArrasAssets();
 
     // Keep the proxy pool fresh — 1500 bots burn through proxies on every
     // reconnect/respawn, so a one-shot fetch starves after a few minutes.
+    // No rankProxies here: ranking is defender-only and gets kicked from
+    // the defender spawn path when it's actually needed.
     setInterval(() => {
-        fetchProxies().then(() => rankProxies());
+        fetchProxies();
     }, PROXY_REFRESH_MS);
 
     // Cheap liveness telemetry so long runs can be observed.
