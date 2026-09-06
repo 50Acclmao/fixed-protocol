@@ -16,7 +16,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: cd arras-headless && npm install
 
       - name: Install cloudflared
         run: |
@@ -25,13 +25,101 @@ jobs:
           sudo apt-get update
           sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
 
-      - name: Start app and tunnel
+      - name: Start TryCloudflare tunnel first
         run: |
-          node server.js > app.log 2>&1 &
-          sleep 3
-          cloudflared tunnel --url http://localhost:8082 > tunnel.log 2>&1 &
-          sleep 5
-          grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' tunnel.log || cat tunnel.log
+          echo "Starting TryCloudflare tunnel..."
 
-      - name: Keep workflow running
-        run: sleep 3600
+          cloudflared tunnel --url http://127.0.0.1:8082 \
+            > tunnel.log 2>&1 &
+
+          echo $! > cloudflared.pid
+
+          echo "Waiting for TryCloudflare URL..."
+
+          for i in {1..30}; do
+            URL=$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' tunnel.log | head -n 1)
+
+            if [ -n "$URL" ]; then
+              echo ""
+              echo "=========================================="
+              echo " TRY CLOUDFLARE URL"
+              echo " $URL"
+              echo "=========================================="
+              echo ""
+              break
+            fi
+
+            sleep 1
+          done
+
+          if [ -z "$URL" ]; then
+            echo "Failed to obtain TryCloudflare URL."
+            cat tunnel.log
+            exit 1
+          fi
+
+      - name: Start Node server on port 8082
+        run: |
+          echo "Starting Node server..."
+
+          cd arras-headless
+          node server.js > ../app.log 2>&1 &
+          echo $! > ../node.pid
+
+          echo "Node PID: $(cat ../node.pid)"
+          echo "Node is starting on port 8082..."
+
+      - name: Live logs + monitor
+        run: |
+          URL=$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' tunnel.log | head -n 1)
+
+          echo ""
+          echo "############################################"
+          echo "#          SERVER CONNECTION INFO          #"
+          echo "############################################"
+          echo ""
+          echo "TryCloudflare:"
+          echo "$URL"
+          echo ""
+          echo "Node:"
+          echo "http://127.0.0.1:8082"
+          echo ""
+          echo "Tunnel:"
+          echo "$URL -> localhost:8082"
+          echo ""
+          echo "############################################"
+          echo ""
+          echo "========== LIVE LOGS =========="
+          echo ""
+
+          touch app.log tunnel.log
+
+          tail -n 0 -F app.log 2>/dev/null &
+          APP_TAIL=$!
+
+          tail -n 0 -F tunnel.log 2>/dev/null &
+          TUNNEL_TAIL=$!
+
+          cleanup() {
+            kill "$APP_TAIL" "$TUNNEL_TAIL" 2>/dev/null || true
+          }
+
+          trap cleanup EXIT
+
+          while true; do
+            if ! kill -0 "$(cat node.pid)" 2>/dev/null; then
+              echo ""
+              echo "========== NODE STOPPED =========="
+              cat app.log
+              exit 1
+            fi
+
+            if ! kill -0 "$(cat cloudflared.pid)" 2>/dev/null; then
+              echo ""
+              echo "========== CLOUDFLARED STOPPED =========="
+              cat tunnel.log
+              exit 1
+            fi
+
+            sleep 5
+          done
