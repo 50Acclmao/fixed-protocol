@@ -22,13 +22,17 @@
     let activeBotCount = 0;
     const sessions = new Map();
 
-    const WORKER_MEMORY_MB = parseInt(process.env.ARRAS_WORKER_MEMORY_MB || "96", 10) || 96;
-    const BOTS_PER_WORKER = parseInt(process.env.ARRAS_BOTS_PER_WORKER || "25", 10) || 25;
-    const PREWARM_POOL_SIZE = parseInt(process.env.ARRAS_PREWARM_POOL || "16", 10) || 16;
-    const MAX_PROXIES = parseInt(process.env.ARRAS_MAX_PROXIES || "6000", 10) || 6000;
-    const MAX_WORKERS = parseInt(process.env.ARRAS_MAX_WORKERS || "128", 10) || 128;
-    const MAX_BOTS_GLOBAL = Math.max(50, parseInt(process.env.ARRAS_MAX_BOTS || "1500", 10) || 1500);
+    const WORKER_MEMORY_MB = parseInt(process.env.ARRAS_WORKER_MEMORY_MB || "128", 10) || 128;
+    const BOTS_PER_WORKER = parseInt(process.env.ARRAS_BOTS_PER_WORKER || "40", 10) || 40;
+    const PREWARM_POOL_SIZE = parseInt(process.env.ARRAS_PREWARM_POOL || "32", 10) || 32;
+    const MAX_PROXIES = parseInt(process.env.ARRAS_MAX_PROXIES || "12000", 10) || 12000;
+    const MAX_WORKERS = parseInt(process.env.ARRAS_MAX_WORKERS || "256", 10) || 256;
+    const MAX_BOTS_GLOBAL = Math.max(50, parseInt(process.env.ARRAS_MAX_BOTS || "6000", 10) || 6000);
     const PROXY_REFRESH_MS = parseInt(process.env.ARRAS_PROXY_REFRESH_MS || "180000", 10) || 180000;
+    // Allow proxy-less (direct) spawns as a last resort when the proxy pool is
+    // empty. OFF by default: one IP can only hold so many connections before
+    // the server flags it. Enable with ARRAS_ALLOW_DIRECT=1.
+    const ALLOW_DIRECT = process.env.ARRAS_ALLOW_DIRECT === "1";
     const ARRAS_WS_PROTOCOLS = ["arras.io#v1.4+sls+et0", "arras.io"];
 
     let PROXY_POOL = [];
@@ -120,8 +124,9 @@
         isRankingProxies = true;
 
         try {
-            // Cap the test load — checking 800 is plenty to find fast ones
-            const candidates = PROXY_POOL.slice(0, 800);
+            // Cap the test load — checking a bigger slice keeps top-tier
+            // defenders fed on very large spawns.
+            const candidates = PROXY_POOL.slice(0, 2500);
 
             const results = await Promise.all(
                 candidates.map(async (proxyUrl) => {
@@ -130,7 +135,7 @@
                     try {
                         const res = await realFetch("https://arras.io", {
                             agent: new HttpsProxyAgent(proxyUrl),
-                            timeout: 4000
+                            timeout: 6000
                         });
 
                         await res.arrayBuffer();
@@ -167,11 +172,14 @@
 
         if (!session.proxyQueue || session.proxyQueue.length === 0) {
             // Queue ran dry — refill once from the live pool so long-running
-            // farms (1000+ bots) keep spawning instead of dying out.
+            // farms keep spawning instead of dying out.
             if (PROXY_POOL.length) {
                 session.proxyQueue = PROXY_POOL.slice();
                 return session.proxyQueue.pop();
             }
+
+            // No proxies anywhere right now — direct fallback when enabled.
+            if (ALLOW_DIRECT) return "";
 
             return null;
         }
@@ -364,7 +372,9 @@
 
         const proxyUrl = takeUniqueProxy(session, isDefender);
 
-        if (!proxyUrl) return false;
+        // null = no proxy available and direct mode disabled. An empty string
+        // means a proxy-less (direct) spawn was explicitly allowed.
+        if (proxyUrl === null) return false;
 
         const worker = acquireWorker(session, isDefender);
         const botId = session.nextBotId++;
@@ -391,10 +401,9 @@
             type: "start",
             config: {
                 id: botId,
-                proxy: {
-                    type: "http",
-                    url: proxyUrl
-                },
+                proxy: proxyUrl
+                    ? { type: "http", url: proxyUrl }
+                    : null,
                 hash: spawnHash,
                 name: botName,
                 stats: [0, 0, 0, 0, 0, 0, 0, 9],
@@ -408,7 +417,18 @@
                 chatSpam: "",
                 initialTarget: {
                     tank: selectedTank,
-                    isDefender: !!isDefender
+                    isDefender: !!isDefender,
+                    // Seed new spawns with the latest known operator
+                    // position so they steer immediately instead of
+                    // idling until the next A (position) packet arrives.
+                    ...(session.lastA ? {
+                        x: session.lastA.payload.x,
+                        y: session.lastA.payload.y,
+                        mouseX: session.lastA.payload.mouseX,
+                        mouseY: session.lastA.payload.mouseY,
+                        followMouse: !!session.lastA.payload.mouse,
+                        noMove: !!session.lastA.payload.noMove
+                    } : {})
                 },
                 squadId: rawHash,
                 reconnectAttempts: 2,
@@ -419,10 +439,60 @@
             }
         });
 
+        // Push the cached position to this worker right away. The bot just
+        // spawned with the same coords in initialTarget, and this live
+        // update guarantees every bot on the worker (old and new) has a
+        // target heading so WASD triggers immediately.
+        if (session.lastA) {
+            worker.send(
+                isDefender
+                    ? session.lastA.defenderPayload
+                    : session.lastA.payload
+            );
+        }
+
         totalSpawned++;
         activeBotCount++;
 
         return true;
+    }
+
+    function spawnBatch(session, hash, botName, count, isDefender) {
+        // Spawn as many as possible without letting a single transient proxy
+        // miss (or a slow refetch) kill the entire request. Retries a couple
+        // of times while proxies refetch in the background; only gives up when
+        // the global cap is reached or the proxy situation can't recover.
+        let spawned = 0;
+        let staleMisses = 0;
+
+        for (let i = 0; i < count; i++) {
+            if (spawnBotNow(session, hash, botName, isDefender)) {
+                spawned++;
+                staleMisses = 0;
+                continue;
+            }
+
+            if (activeBotCount >= MAX_BOTS_GLOBAL) break; // cap reached
+
+            // Proxy problem: kick a background refetch once, then keep trying
+            // a few more iterations so freshly fetched proxies can land.
+            staleMisses++;
+            if (staleMisses === 1) {
+                rawLog(`[spawn] proxy pool ran low — refetching (spawned ${spawned} so far, ${PROXY_POOL.length} in pool)`);
+                fetchProxies().then(() => rankProxies());
+            }
+
+            if (staleMisses >= 4 && PROXY_POOL.length === 0 && !ALLOW_DIRECT) {
+                rawLog(`[spawn] no proxies available and direct spawns disabled — stopped at ${spawned}`);
+                break;
+            }
+        }
+
+        if (spawned > 0) {
+            rawLog(`[spawn] requested ${count}, spawned ${spawned} (active=${activeBotCount}/${MAX_BOTS_GLOBAL})`);
+        }
+
+        return spawned;
     }
 
     function readTailText(filePath, maxBytes = 1048576) {
@@ -1055,6 +1125,8 @@
 
                     resolvedHash: null,
 
+                    lastA: null,
+
                     teamColor: null,
 
                     ws: null
@@ -1322,24 +1394,15 @@
                                     count =
                                         Math.min(
                                             count,
-                                            2000
+                                            10000
                                         );
 
-                                    for (
-                                        let i = 0;
-                                        i < count;
-                                        i++
-                                    ) {
-                                        if (
-                                            !spawnBotNow(
-                                                session,
-                                                hash,
-                                                botName
-                                            )
-                                        ) {
-                                            break;
-                                        }
-                                    }
+                                    spawnBatch(
+                                        session,
+                                        hash,
+                                        botName,
+                                        count
+                                    );
                                 }
 
                                 break;
@@ -1364,7 +1427,7 @@
                                                     10
                                                 ) || 1
                                             ),
-                                            2000
+                                            10000
                                         );
 
                                     const botName =
@@ -1382,22 +1445,13 @@
 
                                     session.tankIdx = 0;
 
-                                    for (
-                                        let i = 0;
-                                        i < count;
-                                        i++
-                                    ) {
-                                        if (
-                                            !spawnBotNow(
-                                                session,
-                                                hash,
-                                                botName,
-                                                true
-                                            )
-                                        ) {
-                                            break;
-                                        }
-                                    }
+                                    spawnBatch(
+                                        session,
+                                        hash,
+                                        botName,
+                                        count,
+                                        true
+                                    );
                                 }
 
                                 break;
@@ -1643,6 +1697,15 @@
                                             session.teamColor
                                     };
 
+                                    // Remember the latest validated position
+                                    // packet so brand-new bots can be seeded
+                                    // with it on spawn (no more idle "waiting
+                                    // for WASD" until the next A packet).
+                                    session.lastA = {
+                                        payload,
+                                        defenderPayload
+                                    };
+
                                     for (
                                         const w
                                         of session.workers
@@ -1854,7 +1917,7 @@
         fetchProxies().then(() => rankProxies());
     }, PROXY_REFRESH_MS);
 
-    // Cheap liveness telemetry so long headless runs can be observed.
+    // Cheap liveness telemetry so long runs can be observed.
     setInterval(() => {
         let workerCount = 0;
         for (const s of sessions.values()) {
