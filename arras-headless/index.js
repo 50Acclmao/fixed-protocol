@@ -79,8 +79,8 @@
     manualY: 0,
     noMove: false,
     wavy: true,
-    wavyAmp: 0.42,
-    wavyFreq: 0.4,
+    wavyAmp: 0.55,
+    wavyFreq: 0.55,
     isDefender: false,
     chatSpam: "",
     huntName: "",
@@ -531,6 +531,7 @@
       let lastAutospin = false;
       let lastChatAt = 0;
       let isJoining = false;
+      let wanderTarget = null; // drift point used before the first A (position) packet arrives
       const log = function () {
         // Logging disabled to save RAM
       };
@@ -545,7 +546,17 @@
       const internalBotInterface = {
         id: config.id,
         log: log,
-        updateTarget: (patch) => Object.assign(target, patch),
+        updateTarget: (patch) => {
+          Object.assign(target, patch);
+          // Defenders always stay in auto-fire + auto-spin: even if an
+          // operator position packet carries autofire=0/autospin=0, snap
+          // the flags back so the E/C toggles pressed during onJoin are
+          // never desynced or cancelled.
+          if (target.isDefender) {
+            target.autofire = true;
+            target.autospin = true;
+          }
+        },
         simulateKey: (code) => {
           if (trigger.keydown && trigger.keyup) {
             trigger.keydown(code);
@@ -1048,7 +1059,7 @@
         }
       }
 
-      const WAVE_FINISH_RADIUS = 90; // below this the bot steers dead-straight
+      const WAVE_FINISH_RADIUS = 55; // below this the bot steers dead-straight
       const WAVE_ARRIVE_RADIUS = 10; // within this the bot plants itself
       const wavyPhase = Math.random() * Math.PI * 2;
 
@@ -1071,9 +1082,9 @@
 
         if (target.wavy) {
           const finishDamp = Math.min(1, Math.max(0, (dist - WAVE_FINISH_RADIUS) / 230));
-          const amp = Math.min(target.wavyAmp || 0.42, 0.45) * finishDamp;
+          const amp = Math.min(target.wavyAmp || 0.55, 0.65) * finishDamp;
           if (amp > 0) {
-            angle += Math.sin(Date.now() * 0.01 * (target.wavyFreq || 0.4) + wavyPhase) * amp;
+            angle += Math.sin(Date.now() * 0.01 * (target.wavyFreq || 0.55) + wavyPhase) * amp;
           }
         }
 
@@ -1196,8 +1207,23 @@ async function onJoin() {
     }
 
     // Only press E once fully out of the upgrade window — the main
-    // loop's autofire toggle (isUpgrading-gated) handles the initial press
+    // loop's autofire toggle (isUpgrading-gated) handles the initial press.
     lastAutofire = false;
+
+    if (target.isDefender) {
+      // Defenders always enable auto-fire + auto-spin the instant they're
+      // out of the upgrade window so they start shooting immediately and
+      // spin continuously. E = auto-fire toggle, C = auto-spin toggle: a
+      // single press each flips them on, and we keep the game's toggle
+      // state synced with lastAutofire/lastAutospin so the main loop's
+      // toggle guards never issue a second (cancelling) press.
+      controller.press("KeyE");
+      lastAutofire = true;
+      target.autofire = true;
+      controller.press("KeyC");
+      lastAutospin = true;
+      target.autospin = true;
+    }
 
   } finally {
     isUpgrading = false;
@@ -1342,6 +1368,30 @@ const mainInterval = setInterval(function () {
                 } else {
                   aimTarget.x = target.x;
                   aimTarget.y = target.y;
+                }
+                valid = true;
+              } else {
+                // Freshly spawned bot with no operator position yet — it's
+                // waiting before the first A (position) packet reaches this
+                // worker. Wander lazily so it cruises instead of parking
+                // in place; the wave still applies so it looks natural.
+                if (!wanderTarget ||
+                    Math.hypot(wanderTarget.x - position[0], wanderTarget.y - position[1]) < 40) {
+                  const ang = Math.random() * Math.PI * 2;
+                  const rad = 120 + Math.random() * 260;
+                  wanderTarget = {
+                    x: position[0] + Math.cos(ang) * rad,
+                    y: position[1] + Math.sin(ang) * rad
+                  };
+                }
+                moveTarget.x = wanderTarget.x;
+                moveTarget.y = wanderTarget.y;
+                if (target.followMouse) {
+                  aimTarget.x = position[0] + (target.mouseX || 0);
+                  aimTarget.y = position[1] + (target.mouseY || 0);
+                } else {
+                  aimTarget.x = wanderTarget.x;
+                  aimTarget.y = wanderTarget.y;
                 }
                 valid = true;
               }
