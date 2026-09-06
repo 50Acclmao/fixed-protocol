@@ -79,8 +79,8 @@
     manualY: 0,
     noMove: false,
     wavy: true,
-    wavyAmp: 0.55,
-    wavyFreq: 0.55,
+    wavyAmp: 0.65,
+    wavyFreq: 0.85,
     isDefender: false,
     chatSpam: "",
     huntName: "",
@@ -1082,9 +1082,9 @@
 
         if (target.wavy) {
           const finishDamp = Math.min(1, Math.max(0, (dist - WAVE_FINISH_RADIUS) / 230));
-          const amp = Math.min(target.wavyAmp || 0.55, 0.65) * finishDamp;
+          const amp = Math.min(target.wavyAmp || 0.65, 0.75) * finishDamp;
           if (amp > 0) {
-            angle += Math.sin(Date.now() * 0.01 * (target.wavyFreq || 0.55) + wavyPhase) * amp;
+            angle += Math.sin(Date.now() * 0.01 * (target.wavyFreq || 0.85) + wavyPhase) * amp;
           }
         }
 
