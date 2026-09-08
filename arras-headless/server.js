@@ -29,6 +29,10 @@
     const MAX_WORKERS = parseInt(process.env.ARRAS_MAX_WORKERS || "256", 10) || 256;
     const MAX_BOTS_GLOBAL = Math.max(50, parseInt(process.env.ARRAS_MAX_BOTS || "6000", 10) || 6000);
     const PROXY_REFRESH_MS = parseInt(process.env.ARRAS_PROXY_REFRESH_MS || "180000", 10) || 180000;
+    // Parallel / staggered spawn: bots per burst and delay between bursts.
+    // Softens CPU/RAM spikes on large #F / #D requests (e.g. 500).
+    const SPAWN_BURST = Math.max(1, parseInt(process.env.ARRAS_SPAWN_BURST || "4", 10) || 4);
+    const SPAWN_GAP_MS = Math.max(0, parseInt(process.env.ARRAS_SPAWN_GAP_MS || "350", 10) || 350);
     // Allow proxy-less (direct) spawns as a last resort when the proxy pool is
     // empty. OFF by default: one IP can only hold so many connections before
     // the server flags it. Enable with ARRAS_ALLOW_DIRECT=1.
@@ -459,54 +463,130 @@
     }
 
     function spawnBatch(session, hash, botName, count, isDefender) {
-        // Spawn as many as possible without letting a single transient proxy
-        // miss (or a slow refetch) kill the entire request. Retries a couple
-        // of times while proxies refetch in the background; only gives up when
-        // the global cap is reached or the proxy situation can't recover.
+        // Back-compat sync entry: still used if something expects an immediate
+        // return value. Prefer spawnBatchParallel for large floods.
+        return spawnBatchParallel(session, hash, botName, count, isDefender);
+    }
 
-        // Proxy ranking exists only for defenders. Kick a latency pass only
-        // when a defender batch needs one — normal follow bots never touch
-        // PROXY_RANKED and never trigger ranking.
-        if (isDefender && PROXY_RANKED.length === 0) {
-            rankProxies(count);
+    /**
+     * Parallel / staggered spawn.
+     * Starts bots in bursts of SPAWN_BURST, waits SPAWN_GAP_MS between bursts,
+     * unique proxy per bot, skips dead pool holes, respects MAX_BOTS_GLOBAL.
+     * Returns a Promise<number> of how many actually started.
+     */
+    function spawnBatchParallel(session, hash, botName, count, isDefender) {
+        const want = Math.max(1, Math.min(parseInt(count, 10) || 1, 10000));
+
+        // Cancel any previous in-flight parallel job for this session so a
+        // second #F doesn't double-book the farm.
+        if (session.spawnJob && typeof session.spawnJob.cancel === "function") {
+            session.spawnJob.cancel();
+            session.spawnJob = null;
         }
 
+        if (isDefender && PROXY_RANKED.length === 0) {
+            rankProxies(want);
+        }
+
+        let cancelled = false;
         let spawned = 0;
         let staleMisses = 0;
+        let remaining = want;
 
-        for (let i = 0; i < count; i++) {
-            if (spawnBotNow(session, hash, botName, isDefender)) {
-                spawned++;
-                staleMisses = 0;
-                continue;
+        const job = {
+            cancel() {
+                cancelled = true;
             }
+        };
+        session.spawnJob = job;
 
-            if (activeBotCount >= MAX_BOTS_GLOBAL) break; // cap reached
+        rawLog(
+            `[spawn] parallel start requested=${want} burst=${SPAWN_BURST} gap=${SPAWN_GAP_MS}ms ` +
+            `active=${activeBotCount}/${MAX_BOTS_GLOBAL} proxies=${PROXY_POOL.length}`
+        );
 
-            // Proxy problem: kick a background refetch once, then keep trying
-            // a few more iterations so freshly fetched proxies can land.
-            // Only defender batches rank the freshly fetched set.
-            staleMisses++;
-            if (staleMisses === 1) {
-                rawLog(`[spawn] proxy pool ran low — refetching (spawned ${spawned} so far, ${PROXY_POOL.length} in pool)`);
-                if (isDefender) {
-                    fetchProxies().then(() => rankProxies(count));
-                } else {
-                    fetchProxies();
+        return new Promise((resolve) => {
+            const finish = () => {
+                if (session.spawnJob === job) session.spawnJob = null;
+                rawLog(
+                    `[spawn] parallel done requested=${want} spawned=${spawned} ` +
+                    `active=${activeBotCount}/${MAX_BOTS_GLOBAL}`
+                );
+                resolve(spawned);
+            };
+
+            const runBurst = () => {
+                if (cancelled) return finish();
+                if (remaining <= 0) return finish();
+                if (activeBotCount >= MAX_BOTS_GLOBAL) {
+                    rawLog(`[spawn] hit global cap ${MAX_BOTS_GLOBAL} — stopping parallel job`);
+                    return finish();
                 }
-            }
 
-            if (staleMisses >= 4 && PROXY_POOL.length === 0 && !ALLOW_DIRECT) {
-                rawLog(`[spawn] no proxies available and direct spawns disabled — stopped at ${spawned}`);
-                break;
-            }
-        }
+                const burstSize = Math.min(SPAWN_BURST, remaining, MAX_BOTS_GLOBAL - activeBotCount);
+                let startedThisBurst = 0;
 
-        if (spawned > 0) {
-            rawLog(`[spawn] requested ${count}, spawned ${spawned} (active=${activeBotCount}/${MAX_BOTS_GLOBAL})`);
-        }
+                for (let i = 0; i < burstSize; i++) {
+                    if (cancelled) break;
+                    if (activeBotCount >= MAX_BOTS_GLOBAL) break;
 
-        return spawned;
+                    if (spawnBotNow(session, hash, botName, isDefender)) {
+                        spawned++;
+                        remaining--;
+                        startedThisBurst++;
+                        staleMisses = 0;
+                        continue;
+                    }
+
+                    // Cap reached inside spawnBotNow
+                    if (activeBotCount >= MAX_BOTS_GLOBAL) break;
+
+                    // Proxy miss — refetch once, keep trying a few times
+                    staleMisses++;
+                    if (staleMisses === 1) {
+                        rawLog(
+                            `[spawn] proxy pool low — refetching ` +
+                            `(spawned ${spawned}, pool ${PROXY_POOL.length})`
+                        );
+                        if (isDefender) {
+                            fetchProxies().then(() => rankProxies(remaining));
+                        } else {
+                            fetchProxies();
+                        }
+                    }
+
+                    if (staleMisses >= 6 && PROXY_POOL.length === 0 && !ALLOW_DIRECT) {
+                        rawLog(
+                            `[spawn] no proxies and direct disabled — stopped at ${spawned}`
+                        );
+                        return finish();
+                    }
+
+                    // Don't burn the whole burst on dead proxies in one tick
+                    break;
+                }
+
+                if (cancelled || remaining <= 0 || activeBotCount >= MAX_BOTS_GLOBAL) {
+                    return finish();
+                }
+
+                // Schedule next burst. If this burst got nothing, wait longer
+                // so a proxy refetch can land.
+                const gap = startedThisBurst > 0 ? SPAWN_GAP_MS : Math.max(SPAWN_GAP_MS, 800);
+                const tNext = setTimeout(() => {
+                    session.spawnTimers.delete(tNext);
+                    runBurst();
+                }, gap);
+                session.spawnTimers.add(tNext);
+            };
+
+            // First burst on next tick so the WS handler returns immediately
+            const t0 = setTimeout(() => {
+                session.spawnTimers.delete(t0);
+                runBurst();
+            }, 0);
+            session.spawnTimers.add(t0);
+        });
     }
 
     function readTailText(filePath, maxBytes = 1048576) {
@@ -854,11 +934,18 @@
                 "protocol-only-random-client.js"
             );
 
-        const proxyUrl =
-            takeUniqueProxy(session);
-
+        // Staggered parallel protocol-only spawn: each child gets its own
+        // proxy so dead proxies are skipped instead of shared by all N.
         for (let i = 0; i < count; i++) {
             const timer = setTimeout(() => {
+                const proxyUrl = takeUniqueProxy(session);
+                if (proxyUrl === null && !ALLOW_DIRECT) {
+                    rawLog(
+                        `[protocol-spawn] no proxy for child ${i + 1}/${count} — skip`
+                    );
+                    return;
+                }
+
                 const clientLogId =
                     `${hash || "bot"}-${i + 1}`;
 
@@ -922,6 +1009,10 @@
 
             session.spawnTimers.add(timer);
         }
+
+        rawLog(
+            `[protocol-spawn] parallel queued count=${count} delay=${delay}ms`
+        );
     }
 
     function stopProtocolOnlyClients(session) {
@@ -1126,6 +1217,9 @@
 
                     spawnTimers:
                         new Set(),
+
+                    // Active parallel spawn job ({ cancel() }) or null
+                    spawnJob: null,
 
                     nextBotId: 0,
 
@@ -1411,11 +1505,13 @@
                                             10000
                                         );
 
-                                    spawnBatch(
+                                    // Parallel staggered spawn (bursts)
+                                    spawnBatchParallel(
                                         session,
                                         hash,
                                         botName,
-                                        count
+                                        count,
+                                        false
                                     );
                                 }
 
@@ -1459,7 +1555,8 @@
 
                                     session.tankIdx = 0;
 
-                                    spawnBatch(
+                                    // Parallel staggered defender spawn
+                                    spawnBatchParallel(
                                         session,
                                         hash,
                                         botName,
@@ -1568,6 +1665,11 @@
 
                                 session.spawnTimers.clear();
 
+                                if (session.spawnJob) {
+                                    try { session.spawnJob.cancel(); } catch {}
+                                    session.spawnJob = null;
+                                }
+
                                 stopProtocolOnlyClients(
                                     session
                                 );
@@ -1656,6 +1758,21 @@
                                                 ? 1
                                                 : 0,
 
+                                        // R override (same pattern as E autofire @ data[9])
+                                        override:
+                                            data[15]
+                                                ? 1
+                                                : 0,
+
+                                        wavy:
+                                            data[16] === undefined
+                                                ? undefined
+                                                : data[16]
+                                                    ? 1
+                                                    : 0,
+                                        wavyAmp: data[17],
+                                        wavyFreq: data[18],
+
                                         teamColor:
                                             session.teamColor
                                     };
@@ -1698,6 +1815,11 @@
 
                                         autospin:
                                             data[10]
+                                                ? 1
+                                                : 0,
+
+                                        override:
+                                            data[15]
                                                 ? 1
                                                 : 0,
 
@@ -1899,6 +2021,11 @@
 
                     session.spawnTimers.clear();
 
+                    if (session.spawnJob) {
+                        try { session.spawnJob.cancel(); } catch {}
+                        session.spawnJob = null;
+                    }
+
                     sessions.delete(addr);
 
                     // Recompute the global count from the sessions that
@@ -1954,6 +2081,10 @@
             stopProtocolOnlyClients(session);
             for (const timer of session.spawnTimers) {
                 clearTimeout(timer);
+            }
+            if (session.spawnJob) {
+                try { session.spawnJob.cancel(); } catch {}
+                session.spawnJob = null;
             }
         }
 
