@@ -1059,8 +1059,8 @@
         }
       }
 
-      const WAVE_FINISH_RADIUS = 55; // below this the bot steers dead-straight
-      const WAVE_ARRIVE_RADIUS = 10; // within this the bot plants itself
+      const WAVE_FINISH_RADIUS = 30; // below this the bot steers dead-straight
+      const WAVE_ARRIVE_RADIUS = 5; // within this the bot plants itself
       const wavyPhase = Math.random() * Math.PI * 2;
 
       function pathfind(x, y) {
