@@ -74,13 +74,16 @@
     rMouseDown: false,
     autofire: false,
     autospin: false,
+    // R key override (same toggle pattern as E autofire)
+    override: false,
     manualMode: false,
     manualX: 0,
     manualY: 0,
     noMove: false,
+    // Octant weave — visible on 8-dir WASD
     wavy: true,
-    wavyAmp: 0.65,
-    wavyFreq: 0.85,
+    wavyAmp: 1.0,
+    wavyFreq: 0.3,
     isDefender: false,
     chatSpam: "",
     huntName: "",
@@ -164,15 +167,17 @@
     rigger: { path: "yjkk", build: "9/9/0/0/0/0/9" },
     doublespread: { path: "yuuy", build: "9/9/0/0/0/0/9" },
     palisade: { path: ["h", "j", "y", [3, 3]], build: "9/9/0/0/0/0/9" },
-    megasmasher: { path: ["r", [3, 3], "y"], build: builds.smasher },
-    spike: { path: ["r", [3, 3], "u"], build: builds.smasher },
-    autoshasher: { path: ["r", [3, 3], "i"], build: builds.smasher },
-    landmine: { path: ["r", [3, 3], "h"], build: builds.smasher },
-    thorn: { path: ["r", [2, 3], "u", "y"], build: builds.smasher },
-    megaspike: { path: ["r", [2, 3], "u", "u"], build: "12/12/0/0/0/0/0/7/3/8" },
-    claymore: { path: ["r", [2, 3], "u", "i"], build: builds.smasher },
-    spear: { path: ["r", [2, 3], "u", "j"], build: builds.smasher },
-    prick: { path: ["r", [2, 3], "u", "k"], build: builds.smasher },
+    // Smasher line: longer waits are applied in onJoin for "r" steps.
+    // Choice clicks use upgrade_map indices; [3,3] = lower-right style slot.
+    spike: { path: ["r", "wait", [3, 3], "wait", "u", "wait", "u"], build: builds.smasher },
+    autoshasher: { path: ["r", "wait", [3, 3], "wait", "i"], build: builds.smasher },
+    landmine: { path: ["r", "wait", [3, 3], "wait", "h"], build: builds.smasher },
+    thorn: { path: ["r", "wait", [2, 3], "wait", "u", "wait", "y"], build: builds.smasher },
+    megaspike: { path: ["r", "wait", [2, 3], "wait", "u", "wait", "u"], build: "12/12/0/0/0/0/0/7/3/8" },
+    claymore: { path: ["r", "wait", [2, 3], "wait", "u", "wait", "i"], build: builds.smasher },
+    spear: { path: ["r", "wait", [2, 3], "wait", "u", "wait", "j"], build: builds.smasher },
+    prick: { path: ["r", "wait", [2, 3], "wait", "u", "wait", "k"], build: builds.smasher },
+    megasmasher: { path: ["r", "wait", [3, 3], "wait", "y"], build: builds.smasher },
     slammer: { path: [[2, 3], "k", "y"], build: "8/10/12/0/0/0/0/12" },
     basher: { path: [[2, 3], "j", "j"], build: "8/10/12/0/0/0/0/12" },
     physician: { path: [[2, 3], [3, 3]], build: "0/12/0/0/0/0/12/12/3/3" },
@@ -529,6 +534,7 @@
       let trigger = {};
       let lastAutofire = false;
       let lastAutospin = false;
+      let lastOverride = false;
       let lastChatAt = 0;
       let isJoining = false;
       let wanderTarget = null; // drift point used before the first A (position) packet arrives
@@ -1059,62 +1065,59 @@
         }
       }
 
-      const WAVE_FINISH_RADIUS = 30; // below this the bot steers dead-straight
+      const WAVE_FINISH_RADIUS = 40; // below this: no octant weave
       const WAVE_ARRIVE_RADIUS = 5; // within this the bot plants itself
       const wavyPhase = Math.random() * Math.PI * 2;
+      let lastHoldKeys = "";
+
+      // 8 movement dirs in clockwise order starting at pure East (D)
+      const OCTANT_KEYS = [
+        ["KeyD"],
+        ["KeyS", "KeyD"],
+        ["KeyS"],
+        ["KeyS", "KeyA"],
+        ["KeyA"],
+        ["KeyW", "KeyA"],
+        ["KeyW"],
+        ["KeyW", "KeyD"]
+      ];
 
       function pathfind(x, y) {
         const dx = x - position[0];
         const dy = y - position[1];
         const dist = Math.hypot(dx, dy);
 
-        // Arrived — stop pressing keys so the tank actually parks on the
-        // position instead of orbiting it forever.
         if (dist < WAVE_ARRIVE_RADIUS) {
-          stopMoving();
+          if (lastHoldKeys !== "") {
+            stopMoving();
+            lastHoldKeys = "";
+          }
           return;
         }
 
-        // Wavy stroll: swing the heading around the true bearing with a
-        // sine. The swing fades to zero inside the finish radius, so the
-        // bot always converges — the wiggle never hides the destination.
-        let angle = getDir(position[0], position[1], x, y);
+        // True bearing, snap to 8-way index 0..7
+        let angle = Math.atan2(dy, dx);
+        let h = Math.round(angle / (Math.PI / 4));
+        h = ((h % 8) + 8) % 8;
 
-        if (target.wavy) {
-          const finishDamp = Math.min(1, Math.max(0, (dist - WAVE_FINISH_RADIUS) / 230));
-          const amp = Math.min(target.wavyAmp || 0.65, 0.75) * finishDamp;
-          if (amp > 0) {
-            angle += Math.sin(Date.now() * 0.01 * (target.wavyFreq || 0.85) + wavyPhase) * amp;
-          }
+        // Visible 8-dir weave: swing ±1 octant (not tiny angle that stays in-sector)
+        if (target.wavy && dist > WAVE_FINISH_RADIUS) {
+          const swing = Math.sin(
+            Date.now() * 0.002 * (target.wavyFreq || 0.3) + wavyPhase
+          );
+          // threshold so it holds left/right long enough to see
+          if (swing > 0.35) h = (h + 1) % 8;
+          else if (swing < -0.35) h = (h + 7) % 8;
         }
 
-        let hold = {};
+        const keys = OCTANT_KEYS[h];
+        const holdSig = keys.join("+");
+        if (holdSig === lastHoldKeys) return;
+        lastHoldKeys = holdSig;
 
-        if (angle >= -Math.PI / 8 && angle < Math.PI / 8) {
-          hold["KeyD"] = true;
-        } else if (angle >= Math.PI / 8 && angle < 3 * Math.PI / 8) {
-          hold["KeyS"] = true;
-          hold["KeyD"] = true;
-        } else if (angle >= 3 * Math.PI / 8 && angle < 5 * Math.PI / 8) {
-          hold["KeyS"] = true;
-        } else if (angle >= 5 * Math.PI / 8 && angle < 7 * Math.PI / 8) {
-          hold["KeyS"] = true;
-          hold["KeyA"] = true;
-        } else if (angle >= 7 * Math.PI / 8 || angle < -7 * Math.PI / 8) {
-          hold["KeyA"] = true;
-        } else if (angle >= -7 * Math.PI / 8 && angle < -5 * Math.PI / 8) {
-          hold["KeyW"] = true;
-          hold["KeyA"] = true;
-        } else if (angle >= -5 * Math.PI / 8 && angle < -3 * Math.PI / 8) {
-          hold["KeyW"] = true;
-        } else {
-          hold["KeyW"] = true;
-          hold["KeyD"] = true;
-        }
-
-        for (let key of "WASD") {
-          key = "Key" + key;
-          trigger[hold[key] ? "keydown" : "keyup"](key);
+        const holdSet = new Set(keys);
+        for (const k of ["KeyW", "KeyA", "KeyS", "KeyD"]) {
+          trigger[holdSet.has(k) ? "keydown" : "keyup"](k);
         }
       }
 
@@ -1156,17 +1159,32 @@ async function onJoin() {
     isUpgradingPath = true;
     for (const key of upgradePath) {
       if (key === "wait") {
-        await waitTime(0);
+        // Smasher/spike line needs real delay so the choice UI is up
+        await waitTime(180);
       } else if (key instanceof Array) {
-        await waitTime(0);
+        await waitTime(120);
+        // click choice slot; retry once if menu is laggy
         await controller.click(
           upgrade_map[key[0]],
           upgrade_map[key[1]]
         );
-        await waitTime(0);
+        await waitTime(100);
+        await controller.click(
+          upgrade_map[key[0]],
+          upgrade_map[key[1]]
+        );
+        await waitTime(150);
       } else {
-        controller.press("Key" + key.toUpperCase());
-        await waitTime(0);
+        const k = String(key).toUpperCase();
+        // Opening smasher branch (R) needs extra settle time
+        if (k === "R") {
+          await waitTime(100);
+          controller.press("KeyR");
+          await waitTime(220);
+        } else {
+          controller.press("Key" + k);
+          await waitTime(90);
+        }
       }
     }
 
@@ -1436,6 +1454,11 @@ const mainInterval = setInterval(function () {
             if (!isUpgrading && !!target.autofire !== !!lastAutofire) {
               controller.press("KeyE");
               lastAutofire = !!target.autofire;
+            }
+            // Override toggle (R) — same pattern as E autofire
+            if (!isUpgrading && !!target.override !== !!lastOverride) {
+              controller.press("KeyR");
+              lastOverride = !!target.override;
             }
             // Auto-spin toggle (C) — real game spin, not orbit
             if (!!target.autospin !== !!lastAutospin) {
@@ -1761,10 +1784,14 @@ const mainInterval = setInterval(function () {
         shift: !!message.shift,
         autofire: !!message.autofire,
         autospin: !!message.autospin,
+        override: !!message.override,
         manualMode: !!message.manualMode,
         manualX: message.manualX,
         manualY: message.manualY,
         noMove: !!message.noMove,
+        wavy: message.wavy !== undefined ? !!message.wavy : undefined,
+        wavyAmp: message.wavyAmp,
+        wavyFreq: message.wavyFreq,
       });
     } else if (message.type == 'huntname') {
       const name = String(message.name || '').trim();
