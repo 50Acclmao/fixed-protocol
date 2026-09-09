@@ -82,7 +82,7 @@
     noMove: false,
     // Octant weave — visible on 8-dir WASD
     wavy: true,
-    wavyAmp: 1.0,
+    wavyAmp: 10.5,
     wavyFreq: 0.3,
     isDefender: false,
     chatSpam: "",
@@ -1065,12 +1065,15 @@
         }
       }
 
-      const WAVE_FINISH_RADIUS = 40; // below this: no octant weave
-      const WAVE_ARRIVE_RADIUS = 5; // within this the bot plants itself
+      const WAVE_FINISH_RADIUS = 10; // straighten inside this
+      const WAVE_ARRIVE_RADIUS = 5;
+      // Lateral snake width in world units (half-amplitude ≈ 9–12)
+      const WAVE_WIDTH_MIN = 9;
+      const WAVE_WIDTH_MAX = 12;
+      const WAVE_WIDTH_DEFAULT = 10.5;
       const wavyPhase = Math.random() * Math.PI * 2;
       let lastHoldKeys = "";
 
-      // 8 movement dirs in clockwise order starting at pure East (D)
       const OCTANT_KEYS = [
         ["KeyD"],
         ["KeyS", "KeyD"],
@@ -1083,9 +1086,9 @@
       ];
 
       function pathfind(x, y) {
-        const dx = x - position[0];
-        const dy = y - position[1];
-        const dist = Math.hypot(dx, dy);
+        const dx0 = x - position[0];
+        const dy0 = y - position[1];
+        const dist = Math.hypot(dx0, dy0);
 
         if (dist < WAVE_ARRIVE_RADIUS) {
           if (lastHoldKeys !== "") {
@@ -1095,20 +1098,31 @@
           return;
         }
 
-        // True bearing, snap to 8-way index 0..7
-        let angle = Math.atan2(dy, dx);
-        let h = Math.round(angle / (Math.PI / 4));
-        h = ((h % 8) + 8) % 8;
-
-        // Visible 8-dir weave: swing ±1 octant (not tiny angle that stays in-sector)
+        // Aim point: true target, optionally nudged sideways by ~9–12 units
+        let aimX = x;
+        let aimY = y;
         if (target.wavy && dist > WAVE_FINISH_RADIUS) {
+          let width = Number(target.wavyAmp);
+          if (!Number.isFinite(width) || width <= 0) width = WAVE_WIDTH_DEFAULT;
+          // if someone still passes radians (~0.5–1.2), treat as scale of default
+          if (width < 3) width = WAVE_WIDTH_DEFAULT * Math.min(1.2, Math.max(0.5, width));
+          width = Math.min(WAVE_WIDTH_MAX, Math.max(WAVE_WIDTH_MIN, width));
+
           const swing = Math.sin(
             Date.now() * 0.002 * (target.wavyFreq || 0.3) + wavyPhase
           );
-          // threshold so it holds left/right long enough to see
-          if (swing > 0.35) h = (h + 1) % 8;
-          else if (swing < -0.35) h = (h + 7) % 8;
+          // unit perpendicular to path (left/right)
+          const inv = 1 / dist;
+          const side = swing * width;
+          aimX = x + (-dy0 * inv) * side;
+          aimY = y + (dx0 * inv) * side;
         }
+
+        const dx = aimX - position[0];
+        const dy = aimY - position[1];
+        let angle = Math.atan2(dy, dx);
+        let h = Math.round(angle / (Math.PI / 4));
+        h = ((h % 8) + 8) % 8;
 
         const keys = OCTANT_KEYS[h];
         const holdSig = keys.join("+");
