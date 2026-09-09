@@ -83,7 +83,7 @@
     // Octant weave — visible on 8-dir WASD
     wavy: true,
     wavyAmp: 10.5,
-    wavyFreq: 0.3,
+    wavyFreq: 3.927, // ~0.8s full cycle
     isDefender: false,
     chatSpam: "",
     huntName: "",
@@ -1109,7 +1109,7 @@
           width = Math.min(WAVE_WIDTH_MAX, Math.max(WAVE_WIDTH_MIN, width));
 
           const swing = Math.sin(
-            Date.now() * 0.002 * (target.wavyFreq || 0.3) + wavyPhase
+            Date.now() * 0.002 * (target.wavyFreq || 3.927) + wavyPhase
           );
           // unit perpendicular to path (left/right)
           const inv = 1 / dist;
