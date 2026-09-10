@@ -193,6 +193,29 @@
     let arrasScriptCache = null;
     let arrasWasmCache = null;
 
+
+    function countLiveBotsForSession(session) {
+        let n = 0;
+        if (!session) return 0;
+        for (const w of session.workers || []) n += w.activeBots || 0;
+        for (const w of session.pool || []) n += w.activeBots || 0;
+        // protocol-only clients also count as live bots on this runner
+        if (Array.isArray(session.protocolClients)) {
+            n += session.protocolClients.filter((c) => c && !c.dead).length;
+        }
+        return n;
+    }
+
+    function pushLiveBotCount(session, packetFn) {
+        if (typeof packetFn !== "function") return;
+        try {
+            // Prefer process-wide active count (one workflow = one farm).
+            // Fallback to session workers if global drifts.
+            const live = Math.max(activeBotCount, countLiveBotsForSession(session));
+            packetFn("N", live, totalSpawned);
+        } catch {}
+    }
+
     const server = http.createServer((req, res) => {
         res.writeHead(426, { "Content-Type": "text/plain" });
         res.end("lll elk ez big fat noob");
@@ -1248,6 +1271,16 @@
                                     fillPool(
                                         session
                                     );
+
+                                    // Live bot count → controller (sums across workflows on client)
+                                    pushLiveBotCount(session, packet);
+                                    if (session._liveStatsTimer) {
+                                        clearInterval(session._liveStatsTimer);
+                                    }
+                                    session._liveStatsTimer = setInterval(() => {
+                                        if (!verified) return;
+                                        pushLiveBotCount(session, packet);
+                                    }, 1500);
                                 } else {
                                     close();
                                 }
@@ -1458,6 +1491,7 @@
                                         count,
                                         false
                                     );
+                                    pushLiveBotCount(session, packet);
                                 }
 
                                 break;
@@ -1505,6 +1539,7 @@
                                         count,
                                         true
                                     );
+                                    pushLiveBotCount(session, packet);
                                 }
 
                                 break;
@@ -1637,6 +1672,8 @@
                                 fillPool(
                                     session
                                 );
+
+                                pushLiveBotCount(session, packet);
 
                                 break;
 
@@ -1914,26 +1951,22 @@
 
                                 break;
 
-                            case "S":
+                            case "Y":
+                                // Sing: data[0]=on/off, data[1]=lyrics array|newline string, data[2]=delay ms
                                 if (!verified) break;
-
                                 {
-                                    const enabled =
-                                        data[0];
-
-                                    for (
-                                        const w
-                                        of session.workers
-                                    ) {
-                                        w.send({
-                                            type:
-                                                "sing",
-                                            enabled:
-                                                !!enabled
-                                        });
+                                    const enabled = !!data[0];
+                                    let lyrics = null;
+                                    if (Array.isArray(data[1])) {
+                                        lyrics = data[1];
+                                    } else if (typeof data[1] === "string" && data[1].trim()) {
+                                        lyrics = data[1].split("\n").map((s) => s.trim()).filter(Boolean);
+                                    }
+                                    const delay = parseInt(data[2], 10) || 4000;
+                                    for (const w of session.workers) {
+                                        w.send({ type: "sing", enabled, lyrics, delay });
                                     }
                                 }
-
                                 break;
 
                             default:
