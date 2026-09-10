@@ -419,23 +419,25 @@
 
         const rawHash = String(hash || "").replace(/^#/, "");
 
-        // Defenders always join the operator's live party (session.resolvedHash
-        // / player hash). They intentionally ignore the hash used for normal
-        // follow bots (the Ext Server Hash field on F packets).
-        // Regular bots use the hash from the F packet.
+        // Hash rules:
+        // - Normal F bots: once a worker resolves the party code to a full
+        //   hash, reuse session.resolvedHash so later bots actually join.
+        //   (Using only the short code every time was breaking joins.)
+        // - Defenders: always use the hash from the D packet (client sends
+        //   location.hash), stored as session.playerHash — not the F field.
         let spawnHash;
         if (isDefender) {
-            // D packet carries the operator's live location.hash (client ignores
-            // Ext Server Hash for defenders). Prefer that so defenders never
-            // follow a foreign party used by normal F bots.
-            spawnHash = rawHash
-                ? "#" + rawHash
-                : (session.resolvedHash ? "#" + session.resolvedHash : "#");
+            if (rawHash) session.playerHash = rawHash;
+            const defHash = session.playerHash || rawHash || session.resolvedHash || "";
+            spawnHash = defHash ? "#" + String(defHash).replace(/^#/, "") : "#";
         } else {
-            // Normal bots: Ext Server Hash / F packet hash
-            spawnHash = rawHash
-                ? "#" + rawHash
-                : (session.resolvedHash ? "#" + session.resolvedHash : "#");
+            if (rawHash && session.partyKey !== rawHash) {
+                // New party code from Ext Server Hash — clear old resolve
+                session.partyKey = rawHash;
+                session.resolvedHash = null;
+            }
+            const followHash = session.resolvedHash || rawHash || session.partyKey || "";
+            spawnHash = followHash ? "#" + String(followHash).replace(/^#/, "") : "#";
         }
 
         worker.send({
@@ -1195,6 +1197,8 @@
                     proxyQueue: [],
 
                     resolvedHash: null,
+                    partyKey: null,
+                    playerHash: null,
                     botBuild: "",
 
                     lastA: null,
