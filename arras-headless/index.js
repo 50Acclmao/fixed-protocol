@@ -76,13 +76,15 @@
     autospin: false,
     // R key override (same toggle pattern as E autofire)
     override: false,
+    // Match leader aim direction at each bot's own position
+    copyAim: false,
     manualMode: false,
     manualX: 0,
     manualY: 0,
     noMove: false,
     // Octant weave — visible on 8-dir WASD
     wavy: true,
-    wavyAmp: 10.5,
+    wavyAmp: 6,
     wavyFreq: 3.927, // ~0.8s full cycle
     isDefender: false,
     chatSpam: "",
@@ -1065,13 +1067,16 @@
         }
       }
 
-      const WAVE_FINISH_RADIUS = 10; // straighten inside this
+      const WAVE_FINISH_RADIUS = 10; // full straighten inside this
       const WAVE_ARRIVE_RADIUS = 5;
-      // Lateral snake width in world units (half-amplitude ≈ 9–12)
-      const WAVE_WIDTH_MIN = 9;
-      const WAVE_WIDTH_MAX = 12;
-      const WAVE_WIDTH_DEFAULT = 10.5;
-      const wavyPhase = Math.random() * Math.PI * 2;
+      // Lateral wave half-width (world units). Keep modest so formation
+      // slots stay a clean line instead of scattering.
+      const WAVE_WIDTH_DEFAULT = 6;
+      const WAVE_WIDTH_MIN = 4;
+      const WAVE_WIDTH_MAX = 8;
+      // Shared phase (0) so every bot weaves in sync — the formation
+      // sways as one line instead of each bot wandering offline.
+      const wavyPhase = 0;
       let lastHoldKeys = "";
 
       const OCTANT_KEYS = [
@@ -1098,24 +1103,34 @@
           return;
         }
 
-        // Aim point: true target, optionally nudged sideways by ~9–12 units
+        // Default: drive straight at this bot's own target (formation slot).
         let aimX = x;
         let aimY = y;
+
         if (target.wavy && dist > WAVE_FINISH_RADIUS) {
           let width = Number(target.wavyAmp);
           if (!Number.isFinite(width) || width <= 0) width = WAVE_WIDTH_DEFAULT;
-          // if someone still passes radians (~0.5–1.2), treat as scale of default
-          if (width < 3) width = WAVE_WIDTH_DEFAULT * Math.min(1.2, Math.max(0.5, width));
+          if (width < 3) width = WAVE_WIDTH_DEFAULT;
           width = Math.min(WAVE_WIDTH_MAX, Math.max(WAVE_WIDTH_MIN, width));
+
+          // Fade wave in with distance so far bots sway, near bots lock on
+          const fade = Math.min(1, Math.max(0, (dist - WAVE_FINISH_RADIUS) / 90));
 
           const swing = Math.sin(
             Date.now() * 0.002 * (target.wavyFreq || 3.927) + wavyPhase
           );
-          // unit perpendicular to path (left/right)
+
           const inv = 1 / dist;
-          const side = swing * width;
-          aimX = x + (-dy0 * inv) * side;
-          aimY = y + (dx0 * inv) * side;
+          const side = swing * width * fade;
+
+          // Perpendicular nudge of the *aim point*, then blend hard back
+          // toward the true target so overall motion stays a converging line.
+          const wavedX = x + (-dy0 * inv) * side;
+          const wavedY = y + (dx0 * inv) * side;
+          // Max 30% of aim from the wave — 70%+ always true formation target
+          const blend = 0.30 * fade;
+          aimX = x + (wavedX - x) * blend;
+          aimY = y + (wavedY - y) * blend;
         }
 
         const dx = aimX - position[0];
@@ -1212,7 +1227,15 @@ async function onJoin() {
       build = [0, 0, 12, 0, 0, 0, 0, 8];
       controller.press("KeyR");
     } else {
-      build = tanks[target.tank].build.split("/");
+      const override =
+        (config.buildOverride && String(config.buildOverride).trim()) ||
+        (target.buildOverride && String(target.buildOverride).trim()) ||
+        "";
+      const buildStr =
+        override ||
+        (tanks[target.tank] && tanks[target.tank].build) ||
+        "0/0/0/0/0/0/0/0";
+      build = String(buildStr).split("/");
     }
 
     let i2 = 0;
@@ -1427,6 +1450,14 @@ const mainInterval = setInterval(function () {
                 }
                 valid = true;
               }
+            }
+
+            // Copy leader aim: same direction vector at *this* bot's position.
+            // Movement / formation targets are left alone — only the barrel turns.
+            if (target.copyAim && !target.autospin) {
+              aimTarget.x = position[0] + (target.mouseX || 0);
+              aimTarget.y = position[1] + (target.mouseY || 0);
+              valid = true;
             }
 
             if (valid) {
@@ -1799,6 +1830,7 @@ const mainInterval = setInterval(function () {
         autofire: !!message.autofire,
         autospin: !!message.autospin,
         override: !!message.override,
+        copyAim: message.copyAim !== undefined ? !!message.copyAim : undefined,
         manualMode: !!message.manualMode,
         manualX: message.manualX,
         manualY: message.manualY,

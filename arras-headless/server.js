@@ -396,9 +396,24 @@
 
         const rawHash = String(hash || "").replace(/^#/, "");
 
-        const spawnHash = session.resolvedHash
-            ? "#" + session.resolvedHash
-            : "#" + rawHash;
+        // Defenders always join the operator's live party (session.resolvedHash
+        // / player hash). They intentionally ignore the hash used for normal
+        // follow bots (the Ext Server Hash field on F packets).
+        // Regular bots use the hash from the F packet.
+        let spawnHash;
+        if (isDefender) {
+            // D packet carries the operator's live location.hash (client ignores
+            // Ext Server Hash for defenders). Prefer that so defenders never
+            // follow a foreign party used by normal F bots.
+            spawnHash = rawHash
+                ? "#" + rawHash
+                : (session.resolvedHash ? "#" + session.resolvedHash : "#");
+        } else {
+            // Normal bots: Ext Server Hash / F packet hash
+            spawnHash = rawHash
+                ? "#" + rawHash
+                : (session.resolvedHash ? "#" + session.resolvedHash : "#");
+        }
 
         worker.send({
             type: "start",
@@ -418,9 +433,11 @@
                 keysHold: [],
                 tank: selectedTank,
                 chatSpam: "",
+                buildOverride: session.botBuild || "",
                 initialTarget: {
                     tank: selectedTank,
                     isDefender: !!isDefender,
+                    buildOverride: session.botBuild || "",
                     // Seed new spawns with the latest known operator
                     // position so they steer immediately instead of
                     // idling until the next A (position) packet arrives.
@@ -842,9 +859,9 @@
         );
 
         const botName =
-            String(
-                options.botName || "thara"
-            ).trim() || "thara";
+            options.botName === undefined || options.botName === null
+                ? ""
+                : String(options.botName).trim();
 
         const party =
             String(hash || "")
@@ -1155,6 +1172,7 @@
                     proxyQueue: [],
 
                     resolvedHash: null,
+                    botBuild: "",
 
                     lastA: null,
 
@@ -1349,8 +1367,7 @@
 
                                     let count = 1;
 
-                                    let botName =
-                                        "thara's Bot";
+                                    let botName = "";
 
                                     const a =
                                         data[1];
@@ -1379,11 +1396,9 @@
                                             );
 
                                         botName =
-                                            String(
-                                                b ??
-                                                "thara's Bot"
-                                            ).trim() ||
-                                            "thara's Bot";
+                                            b === undefined || b === null
+                                                ? ""
+                                                : String(b).trim();
                                     } else if (
                                         typeof b ===
                                             "number" ||
@@ -1396,11 +1411,9 @@
                                         )
                                     ) {
                                         botName =
-                                            String(
-                                                a ??
-                                                "thara's Bot"
-                                            ).trim() ||
-                                            "thara's Bot";
+                                            a === undefined || a === null
+                                                ? ""
+                                                : String(a).trim();
 
                                         count =
                                             Math.max(
@@ -1411,13 +1424,12 @@
                                                 ) || 1
                                             );
                                     } else {
+                                        // Name-only / ambiguous form — empty allowed (unnamed)
+                                        const raw = a ?? b;
                                         botName =
-                                            String(
-                                                a ??
-                                                b ??
-                                                "thara's Bot"
-                                            ).trim() ||
-                                            "thara's Bot";
+                                            raw === undefined || raw === null
+                                                ? ""
+                                                : String(raw).trim();
 
                                         count = 1;
                                     }
@@ -1428,7 +1440,17 @@
                                             10000
                                         );
 
-                                    // Parallel staggered spawn (bursts)
+                                    // Optional build on F: data[3] = "0/4/3/8/8/9/7/4"
+                                    {
+                                        const buildRaw = data[3];
+                                        if (buildRaw !== undefined && buildRaw !== null) {
+                                            const build = String(buildRaw).trim();
+                                            if (!build || /^[0-9]+(\/[0-9]+)*$/.test(build)) {
+                                                session.botBuild = build;
+                                            }
+                                        }
+                                    }
+
                                     spawnBatch(
                                         session,
                                         hash,
@@ -1464,11 +1486,9 @@
                                         );
 
                                     const botName =
-                                        String(
-                                            data[2] ||
-                                            "Defender"
-                                        ).trim() ||
-                                        "Defender";
+                                        data[2] === undefined || data[2] === null
+                                            ? ""
+                                            : String(data[2]).trim();
 
                                     session.tanks = [
                                         "octo",
@@ -1517,11 +1537,9 @@
                                         );
 
                                     const botName =
-                                        String(
-                                            data[2] ||
-                                            "thara"
-                                        ).trim() ||
-                                        "thara";
+                                        data[2] === undefined || data[2] === null
+                                            ? ""
+                                            : String(data[2]).trim();
 
                                     const requestedDelay =
                                         parseInt(
@@ -1694,6 +1712,11 @@
                                                     : 0,
                                         wavyAmp: data[17],
                                         wavyFreq: data[18],
+                                        // Match leader aim direction on each bot
+                                        copyAim:
+                                            data[19]
+                                                ? 1
+                                                : 0,
 
                                         teamColor:
                                             session.teamColor
@@ -1742,6 +1765,11 @@
 
                                         override:
                                             data[15]
+                                                ? 1
+                                                : 0,
+
+                                        copyAim:
+                                            data[19]
                                                 ? 1
                                                 : 0,
 
