@@ -43,21 +43,7 @@
   let currentBotInterface = {};
   let currentBotInterfaces = [];
   let singInterval = null;
-  const SING_LYRICS = [
-    "I would never fall in love again until I found her",
-    "I said I would never fall unless it's you I fall into",
-    "I was lost within the darkness but then I found her",
-    "I found you",
-    "Georgia, wrap me up in all your-",
-    "I want you in my arms",
-    "Oh, let me hold your hand",
-    "I'll never let you go again like I did",
-    "Oh, I used to say",
-    "I would never fall in love again until I found her",
-    "I said I would never fall unless it's you I fall into",
-    "I was lost within the darkness but then I found her",
-    "I found you"
-  ];
+  const SING_LYRICS = ["Georgia, wrap me up in all your-", "I want you in my arms", "Oh, let me hold you", "I'll never let you go again like I did", "Oh, I used to say", "I would never fall in love again until I found her", "I said I would never fall unless it's you I fall into", "I was lost within the darkness, but then I found her", "I found you", "Georgia, take me hold, take me hold, take me hold", "Take me hold, take me hold, take me hold", "Take me hold, take me hold, take me hold", "Take me hold, take me hold", "I would never fall in love again until I found her", "I said I would never fall unless it's you I fall into", "I was lost within the darkness, but then I found her", "I found you", "I found you", "Oh yeah", "I found you", "Heaven is a place that I can't describe", "When she walks in the room, I lose my mind", "God knows I try to put my finger on it", "But I come up short every time", "I used to say", "I would never fall in love again until I found her", "I said I would never fall unless it's you I fall into", "I was lost within the darkness, but then I found her", "I found you", "I found you", "Oh yeah", "I found you"];
   let devastate = () => {
     for (const bot of currentBotInterfaces) {
       if (bot && bot.destroy) {
@@ -1872,15 +1858,19 @@ const mainInterval = setInterval(function () {
       if (singInterval) { clearInterval(singInterval); singInterval = null; }
       if (message.enabled) {
         let idx = 0;
+        const lines = Array.isArray(message.lyrics) && message.lyrics.length
+          ? message.lyrics.map((s) => String(s || '').trim()).filter(Boolean)
+          : SING_LYRICS;
+        const delay = Math.max(1500, parseInt(message.delay, 10) || 4000);
         singInterval = setInterval(() => {
-          const lyric = SING_LYRICS[idx % SING_LYRICS.length];
+          const lyric = lines[idx % lines.length];
           for (const bot of currentBotInterfaces) {
             if (bot && bot.controller && bot.controller.chat) {
               try { bot.controller.chat(lyric); } catch (e) {}
             }
           }
           idx++;
-        }, 4000);
+        }, delay);
       }
     } else if (message.type == 'destroy') {
       devastate();
